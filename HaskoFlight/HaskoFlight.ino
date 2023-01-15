@@ -9,6 +9,7 @@
 #include <avr/pgmspace.h>
 #include "MPU6050.h"
 #include "PIDcontroller.h"
+#include "CPPM.h"
 
 #define FC_DEBUG
 //#define PWM_BLOCKING
@@ -47,8 +48,6 @@ const float gyroScale = DEG_TO_RAD * 2000.0 / 32767.0;  // max rate / intmax
 const float quatScale = 1.0 / 1073741824.0;             // 2^30
 const float iMax = 20.0;
 
-volatile int16_t _ppm[PPM_CHANNEL_COUNT];  //roll, pitch, throttle, yaw, flight mode, tuning
-
 enum flightMode { DISARMED,
                   RATE_MODE,
                   ANGLE_MODE };
@@ -78,28 +77,6 @@ PIDcontroller pidConroller(iMax, KpidRate);
 void motorMixer(const int16_t throttle, const float (&PIDval)[3], uint16_t (&motorPWM)[4]);
 void startMotorPwm(uint16_t (&motorPWM)[4]);
 
-ISR(PCINT1_vect) {
-  static uint16_t pulse;
-  static uint16_t counter;
-  static uint8_t channel;
-  static uint32_t last_micros;
-
-  uint32_t current_micros = micros();
-  counter = current_micros - last_micros;
-  last_micros = current_micros;
-
-  if (counter < 520) {  //must be a pulse if less than 500us
-    pulse = counter;
-  } else if (counter > 1910) {  //sync pulses over 1910us
-    channel = 0;
-  } else {  //servo values
-    if (channel < PPM_CHANNEL_COUNT) {
-      _ppm[channel] = counter + pulse;
-    }
-    channel++;
-  }
-}
-
 ISR(TIMER2_OVF_vect) {
   TCCR2A = _BV(COM2A1) | _BV(COM2B1);
 
@@ -120,12 +97,10 @@ void setup() {
 #endif
 
   //init ppm
-  pinMode(PPM_Pin, INPUT);
-  PCMSK1 = _BV(PCINT8);  //listen for pin A0
-  PCICR |= _BV(PCIE1);   //enable interrupt
+  attachCPPM(PPM_Pin, PPM_CHANNEL_COUNT);
 
   //continue only after RC ok and disarmed
-  while (!_ppm[4] || _ppm[4] > 1250)
+  while (!CPPMget(4) || CPPMget(4) > 1250)
     ;
 
   //init IMU
@@ -166,15 +141,10 @@ void loop() {
 
     //Benchmark bench;
 
-    int16_t ppm[PPM_CHANNEL_COUNT];
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-      memcpy(ppm, (const void *)_ppm, sizeof(ppm));
-    }
-
     //yaw always in rate mode, so we can do this regardless of flight mode
     //input scaling
     float setPoint[3];
-    setPoint[YAW] = (float)(ppm[3] - rcMidPWM) * rateInputScale;  //desired yaw rate in rad/s
+    setPoint[YAW] = (float)(CPPMget(3) - rcMidPWM) * rateInputScale;  //desired yaw rate in rad/s
 
     //measurement
     float processVariable[3];
@@ -187,9 +157,9 @@ void loop() {
     //track changes of flight mode
     static flightMode lastFlightMode;
     flightMode currentFlightMode;
-    if (ppm[4] > 1750)
+    if (CPPMget(4) > 1750)
       currentFlightMode = ANGLE_MODE;
-    else if (ppm[4] > 1250)
+    else if (CPPMget(4) > 1250)
       currentFlightMode = RATE_MODE;
     else
       currentFlightMode = DISARMED;
@@ -206,12 +176,12 @@ void loop() {
     }
 
     //to prevent I term windup on ground
-    if (ppm[2] < 1020) {
+    if (CPPMget(2) < 1020) {
       pidConroller.reset();
     }
 
 #ifdef KNOB_TUNING_AXIS
-    float tuneValue = max((float)ppm[5] KNOB_TUNING_SCALE, 0.0);
+    float tuneValue = max((float)CPPMget(5) KNOB_TUNING_SCALE, 0.0);
     pidConroller.setKPID(KNOB_TUNING_AXIS, KNOB_TUNING_PART, tuneValue);
 #ifdef FC_DEBUG
     Serial.println(tuneValue);
@@ -222,8 +192,8 @@ void loop() {
       case RATE_MODE:
         {
 
-          setPoint[ROLL] = (float)(ppm[0] - rcMidPWM) * rateInputScale;   //desired roll rate
-          setPoint[PITCH] = (float)(ppm[1] - rcMidPWM) * rateInputScale;  //desired pitch rate
+          setPoint[ROLL] = (float)(CPPMget(0) - rcMidPWM) * rateInputScale;   //desired roll rate
+          setPoint[PITCH] = (float)(CPPMget(1) - rcMidPWM) * rateInputScale;  //desired pitch rate
 
           //Scale for simple rate controller
           processVariable[ROLL] = (float)mpu.getGyro(1) * gyroScale;
@@ -231,15 +201,15 @@ void loop() {
 
           pidConroller.update(setPoint, processVariable, pidValues);
 
-          motorMixer(ppm[2], pidValues, motorPWM);
+          motorMixer(CPPMget(2), pidValues, motorPWM);
         }
         break;
 
       case ANGLE_MODE:
         {
 
-          setPoint[ROLL] = (float)(ppm[0] - rcMidPWM) * levelInputScale;   //desired roll angle
-          setPoint[PITCH] = (float)(ppm[1] - rcMidPWM) * levelInputScale;  //desired pitch angle
+          setPoint[ROLL] = (float)(CPPMget(0) - rcMidPWM) * levelInputScale;   //desired roll angle
+          setPoint[PITCH] = (float)(CPPMget(1) - rcMidPWM) * levelInputScale;  //desired pitch angle
 
           //convert quaternions from int32 to float and normalize
           float q[4];
@@ -257,14 +227,14 @@ void loop() {
 
           pidConroller.update(setPoint, processVariable, pidValues, deriv);
 
-          motorMixer(ppm[2], pidValues, motorPWM);
+          motorMixer(CPPMget(2), pidValues, motorPWM);
         }
         break;
 
       default:
         {
 #ifdef CALIB_MOTORS
-          if (ppm[2] > rcMidPWM) {
+          if (CPPMget(2) > rcMidPWM) {
             for (uint16_t &i : motorPWM)
               i = motorMaxPWM;
           }
@@ -374,4 +344,5 @@ TODO:
 -- OTA firmware update
 - save automatic gyro calibration - mpu_write_mem(D_EXT_GYRO_BIAS_X, 12, regs)
 - separate out ppm and pwm functions to own class
+- write own UART library with a circular buffer for logging (if need more resources)
 */
