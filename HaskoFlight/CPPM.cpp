@@ -51,6 +51,7 @@ void detachCPPM(void) {
 int16_t CPPMget(const uint8_t channel) {
   if (channel > _cppm_count)
     return -1;
+  //atomic block needed to get _cppm_val???
   return _cppm_val[channel];
 }
 

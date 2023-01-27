@@ -5,14 +5,13 @@
 #error wrong CPU frequency
 #endif
 
-#include <util/atomic.h>
 #include <avr/pgmspace.h>
 #include "MPU6050.h"
 #include "PIDcontroller.h"
 #include "CPPM.h"
+#include "OneShot125.h"
 
 #define FC_DEBUG
-//#define PWM_BLOCKING
 //#define CALIB_MOTORS
 
 class Benchmark {
@@ -33,12 +32,6 @@ private:
 #define RATE_MAX 350.0       //in deg/s
 #define PPM_CHANNEL_COUNT 8  //how many RC channels do you need?
 const uint8_t PPM_Pin = A0;  //PC0, PCINT8
-// motor pins:
-// pin 9, OC1A, PB1, rear right
-// pin 10, OC1B, PB2, front right
-// pin 11, OC2A, PB3, front left
-// pin 3, OC2B, PD3, rear left
-const uint16_t motorMinPWM = 1000;
 const uint16_t motorSpinPWM = 1080;
 const uint16_t motorMaxPWM = 2000;
 const int16_t rcMidPWM = 1500;
@@ -75,20 +68,6 @@ PIDcontroller pidConroller(iMax, KpidRate);
 
 //forward declarations
 void motorMixer(const int16_t throttle, const float (&PIDval)[3], uint16_t (&motorPWM)[4]);
-void startMotorPwm(uint16_t (&motorPWM)[4]);
-
-ISR(TIMER2_OVF_vect) {
-  TCCR2A = _BV(COM2A1) | _BV(COM2B1);
-
-  //if ISR is delayed, trigger immediate pin change
-  if (TCNT2 >= OCR2A)
-    TCCR2B |= _BV(FOC2A);
-  if (TCNT2 >= OCR2B)
-    TCCR2B |= _BV(FOC2B);
-
-  //disable overflow interrupt to not run this vector unnecessarily
-  TIMSK2 = 0;
-}
 
 void setup() {
 #ifdef FC_DEBUG
@@ -106,28 +85,8 @@ void setup() {
   //init IMU
   mpu.init();  // load dmp and setup for normal use
 
-  //init motor output
-  DDRB |= _BV(PINB1) | _BV(PINB2) | _BV(PINB3);
-  DDRD |= _BV(PIND3);
-
-  //configure timers and pwm
-  TCCR1A = 0;
-  TCCR1B = 0;
-#ifdef PWM_BLOCKING
-  //init timer1 for timing
-  TCCR1B = _BV(CS11);  //set timer1 to increment every 0,5 us
-#else
-  TCCR2A = 0;
-  TCCR2B = 0;
-
-  //timer 1: compare output mode to Clear, normal mode, no prescaler
-  TCCR1A = _BV(COM1A1) | _BV(COM1B1);
-  TCCR1B = _BV(CS10);
-
-  //timer 2: compare output mode to Clear, normal mode, 8th prescaler
-  TCCR2A = _BV(COM2A1) | _BV(COM2B1);
-  TCCR2B = _BV(CS21);
-#endif  //PWM_BLOCKING
+  //init motor pwm
+  attachOneShot125();
 
 #ifdef FC_DEBUG
   Serial.println("FC init done");
@@ -245,12 +204,15 @@ void loop() {
         break;
     }
 
-    startMotorPwm(motorPWM);
+    writeOneShot125(motorPWM);
 
 #ifdef FC_DEBUG
-    Serial.print(String(processVariable[ROLL] * RAD_TO_DEG) + '\t');
-    Serial.print(String(processVariable[PITCH] * RAD_TO_DEG) + '\t');
-    Serial.println(String(processVariable[YAW] * RAD_TO_DEG));
+    Serial.print(String(micros()) + '\t');
+    Serial.print(String(setPoint[ROLL] * RAD_TO_DEG) + '\t');
+    Serial.print(String(processVariable[ROLL] * RAD_TO_DEG));
+    //Serial.print(String(processVariable[PITCH] * RAD_TO_DEG) + '\t');
+    //Serial.print(String(processVariable[YAW] * RAD_TO_DEG));
+    Serial.println();
 #endif  //FC_DEBUG
   }
 }
@@ -261,52 +223,6 @@ void motorMixer(const int16_t throttle, const float (&PIDval)[3], uint16_t (&mot
   motorPWM[1] = constrain((uint16_t)(throttle - PIDval[ROLL] - PIDval[PITCH] - PIDval[YAW]), motorSpinPWM, motorMaxPWM);  //front right
   motorPWM[2] = constrain((uint16_t)(throttle + PIDval[ROLL] - PIDval[PITCH] + PIDval[YAW]), motorSpinPWM, motorMaxPWM);  //front left
   motorPWM[3] = constrain((uint16_t)(throttle + PIDval[ROLL] + PIDval[PITCH] - PIDval[YAW]), motorSpinPWM, motorMaxPWM);  //rear left
-}
-
-//expects pwm values between 1000 and 2000, make sure they are in bounds
-void startMotorPwm(uint16_t (&motorPWM)[4]) {
-#ifdef PWM_BLOCKING
-  TCNT1 = 0;
-  PORTB |= _BV(1) | _BV(2) | _BV(3);
-  PORTD |= _BV(3);
-  for (uint16_t &i : motorPWM)
-    i <<= 1;
-  uint8_t motready = 0;
-  while (motready < 0x0F) {
-    for (uint8_t i = 0; i < sizeof(motpin); i++) {
-      if (motorPWM[i] < TCNT1 && !bitRead(motready, i)) {
-        //digitalWrite(motpin[i], LOW);
-        bitClear((motpin[i] < 8) ? PORTD : PORTB, motpin[i] % 8);
-        bitSet(motready, i);
-      }
-    }
-  }
-#else
-  OCR1A = motorPWM[0] << 1;
-  OCR1B = motorPWM[1] << 1;
-  OCR2A = (motorPWM[2] - motorMinPWM) >> 2;
-  OCR2B = (motorPWM[3] - motorMinPWM) >> 2;
-
-  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-    //timer 1
-    TCCR1A = _BV(COM1A1) | _BV(COM1A0) | _BV(COM1B1) | _BV(COM1B0);  //set compare output mode to Set
-    TCNT1 = 0;                                                       //reset timer
-    TCCR1C = _BV(FOC1A) | _BV(FOC1B);                                //force output compare
-    TCCR1A = _BV(COM1A1) | _BV(COM1B1);                              //set compare output mode to Clear
-
-    //timer 2
-    TCCR2A = _BV(COM2A1) | _BV(COM2A0) | _BV(COM2B1) | _BV(COM2B0);
-    TCNT2 = 6;  //for initial pulse, will overflow in 250 cycles
-    TCCR2B = _BV(FOC2A) | _BV(FOC2B) | _BV(CS21);
-    //make sure to nail lower pmw, ISR might be delayed
-    if (OCR2A <= 6)
-      TCCR2A &= ~_BV(COM2A0);
-    if (OCR2B <= 6)
-      TCCR2A &= ~_BV(COM2B0);
-    TIMSK2 = _BV(TOIE2);  //enable overflow interrupt
-    TIFR2 = _BV(TOV2);    //clear overflow interrupt flag
-  }
-#endif  //PWM_BLOCKING
 }
 
 /*
@@ -332,7 +248,7 @@ TODO:
 -- test gyro value against processVariable change. Need to scale?
 -- improve parsing dmp fifo data with endian conversion and/or struct
 -- get rid of I2C helper, integrate into MPU6050
-- get rid of inv_dmp_uncompress, integrate into MPU6050
+-- get rid of inv_dmp_uncompress, integrate into MPU6050
 - reconfigure IMU on the fly for faster rate mode
 - convert PID calculation to integer math
 - GPS integration, calculate heading, DMP good enough???
@@ -343,6 +259,6 @@ TODO:
 - bug: roll/pitch coupling on yaw command in angle mode - probably esc problem? - serial debug?
 -- OTA firmware update
 - save automatic gyro calibration - mpu_write_mem(D_EXT_GYRO_BIAS_X, 12, regs)
-- separate out ppm and pwm functions to own class
+-- separate out ppm and pwm functions to own class
 - write own UART library with a circular buffer for logging (if need more resources)
 */
