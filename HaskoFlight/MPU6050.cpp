@@ -1,12 +1,51 @@
 #include <Arduino.h>
 #include "MPU6050.h"
-#include "inv_dmp_uncompress.h"
 
 MPU6050 mpu;
 
 //constructor
 MPU6050::MPU6050(uint8_t Addr) {
   m_mpuAddr = Addr;
+}
+
+const uint8_t compressed_dmp_memory[] PROGMEM = {
+#include "inv_dmp_image.h"
+};
+
+//get dmp from compressed image one byte at a time, can only be called once
+uint8_t inv_dmp_uncompress(void) {
+  static unsigned readPos = 0;
+  static unsigned zeroCount = 0;
+
+  /* already finish ? */
+  if (readPos >= sizeof(compressed_dmp_memory)) {
+    return 0x00;  //return 0x00 even if zeroCount != 0
+  }
+
+  /********************/
+  /* output next char */
+  /********************/
+
+  /* output remaining zeros */
+  if (zeroCount != 0) {
+    zeroCount--;
+    return 0x00;
+  }
+
+  /* else decompress */
+  uint8_t c;
+  c = pgm_read_byte(compressed_dmp_memory + readPos);
+  readPos++;
+
+  /* check for zero */
+  if (c != 0x00) {
+    return c;
+  } else {
+    zeroCount = pgm_read_byte(compressed_dmp_memory + readPos);
+    readPos++;
+  }
+
+  return 0x00;
 }
 
 //Write to the DMP memory
@@ -40,7 +79,7 @@ int8_t MPU6050::m_load_dmp() {  //using compressed DMP firmware
 #endif
 
   /* start loading */
-  inv_dmp_uncompress_reset();
+  //inv_dmp_uncompress_reset();
 
   for (ii = 0; ii < UNCOMPRESSED_DMP_CODE_SIZE; ii += this_write) {
     this_write = min(MPU6050_DMP_MEMORY_CHUNK_SIZE, UNCOMPRESSED_DMP_CODE_SIZE - ii);

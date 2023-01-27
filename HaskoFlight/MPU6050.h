@@ -389,6 +389,7 @@
 #define MPU6050_INTERRUPT_PIN 2              //to which pin is the interrupt conected, comment out if not attached
 #define MPU6050_SAMPLE_RATE 200
 #define MPU6050_FIFO_LENGTH 32
+#define UNCOMPRESSED_DMP_CODE_SIZE 3062
 
 class MPU6050 {
 public:
@@ -403,6 +404,7 @@ private:
   int8_t m_newData;
   uint8_t m_mpuAddr;
   uint8_t m_fifo_data[MPU6050_FIFO_LENGTH];
+  friend uint8_t inv_dmp_uncompress(void);
   int8_t m_mpu_write_mem(uint16_t mem_addr, uint16_t length, uint8_t *data);
   int8_t m_mpu_read_mem(uint16_t mem_addr, uint16_t length, uint8_t *data);
   int8_t m_load_dmp();
