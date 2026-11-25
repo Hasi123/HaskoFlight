@@ -79,7 +79,8 @@ void setup() {
   attachCPPM(PPM_Pin, PPM_CHANNEL_COUNT);
 
   //continue only after RC ok and disarmed
-  while (!CPPMget(4) || CPPMget(4) > 1250)
+  //(CPPMget returns -1 if attachCPPM failed, so this also halts on a bad PPM pin)
+  while (CPPMget(4) <= 0 || CPPMget(4) > 1250)
     ;
 
   //init IMU
@@ -116,9 +117,10 @@ void loop() {
     //track changes of flight mode
     static flightMode lastFlightMode;
     flightMode currentFlightMode;
-    if (CPPMget(4) > 1750)
+    const int16_t modeSwitch = CPPMget(4);  //read once so both comparisons see the same value
+    if (modeSwitch > 1750)
       currentFlightMode = ANGLE_MODE;
-    else if (CPPMget(4) > 1250)
+    else if (modeSwitch > 1250)
       currentFlightMode = RATE_MODE;
     else
       currentFlightMode = DISARMED;
@@ -177,7 +179,9 @@ void loop() {
 
           // Compute Tait-Bryan angles for angle mode
           // http://en.wikipedia.org/wiki/Conversion_between_quaternions_and_Euler_angles
-          processVariable[ROLL] = asin(2.0 * (q[0] * q[2] - q[1] * q[3]));
+          //clamp: the DMP quaternion is not exactly unit length, asin() of >1 would return NaN
+          float sinRoll = constrain(2.0f * (q[0] * q[2] - q[1] * q[3]), -1.0f, 1.0f);
+          processVariable[ROLL] = asin(sinRoll);
           processVariable[PITCH] = -atan2((q[0] * q[1] + q[2] * q[3]), 0.5 - (q[1] * q[1] + q[2] * q[2]));
           //processVariable[YAW] = -atan2((q[1] * q[2] + q[0] * q[3]), 0.5 - (q[2] * q[2] + q[3] * q[3]));
 
@@ -217,12 +221,22 @@ void loop() {
   }
 }
 
-void motorMixer(const int16_t throttle, const float (&PIDval)[3], uint16_t (&motorPWM)[4]) {
+//clamp in float before converting: casting a negative or NaN float to uint16_t is undefined
+static inline uint16_t mixOut(const float value) {
+  if (!(value > motorSpinPWM))  //also catches NaN
+    return motorSpinPWM;
+  if (value > motorMaxPWM)
+    return motorMaxPWM;
+  return (uint16_t)value;
+}
+
+//noinline: called from two places in loop(), LTO would otherwise duplicate it (~1kB)
+__attribute__((noinline)) void motorMixer(const int16_t throttle, const float (&PIDval)[3], uint16_t (&motorPWM)[4]) {
   //mixer for quadcopter X layout
-  motorPWM[0] = constrain((uint16_t)(throttle - PIDval[ROLL] + PIDval[PITCH] + PIDval[YAW]), motorSpinPWM, motorMaxPWM);  //rear right
-  motorPWM[1] = constrain((uint16_t)(throttle - PIDval[ROLL] - PIDval[PITCH] - PIDval[YAW]), motorSpinPWM, motorMaxPWM);  //front right
-  motorPWM[2] = constrain((uint16_t)(throttle + PIDval[ROLL] - PIDval[PITCH] + PIDval[YAW]), motorSpinPWM, motorMaxPWM);  //front left
-  motorPWM[3] = constrain((uint16_t)(throttle + PIDval[ROLL] + PIDval[PITCH] - PIDval[YAW]), motorSpinPWM, motorMaxPWM);  //rear left
+  motorPWM[0] = mixOut(throttle - PIDval[ROLL] + PIDval[PITCH] + PIDval[YAW]);  //rear right
+  motorPWM[1] = mixOut(throttle - PIDval[ROLL] - PIDval[PITCH] - PIDval[YAW]);  //front right
+  motorPWM[2] = mixOut(throttle + PIDval[ROLL] - PIDval[PITCH] + PIDval[YAW]);  //front left
+  motorPWM[3] = mixOut(throttle + PIDval[ROLL] + PIDval[PITCH] - PIDval[YAW]);  //rear left
 }
 
 /*

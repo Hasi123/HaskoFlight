@@ -401,9 +401,10 @@ public:
   int16_t getGyro(const uint8_t index);
 
 private:
-  int8_t m_newData;
+  volatile int8_t m_newData;                 //set from TWI ISR
   uint8_t m_mpuAddr;
-  uint8_t m_fifo_data[MPU6050_FIFO_LENGTH];
+  uint8_t m_fifo_data[MPU6050_FIFO_LENGTH];  //written by TWI ISR
+  uint8_t m_sample[MPU6050_FIFO_LENGTH];     //consistent copy used by the getters
   friend uint8_t inv_dmp_uncompress(void);
   int8_t m_mpu_write_mem(uint16_t mem_addr, uint16_t length, uint8_t *data);
   int8_t m_mpu_read_mem(uint16_t mem_addr, uint16_t length, uint8_t *data);

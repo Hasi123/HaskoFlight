@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include "MPU6050.h"
+#include <util/atomic.h>
 
 MPU6050 mpu;
 
@@ -129,29 +130,34 @@ void MPU6050::init(void) {
   intTW.writeByte(m_mpuAddr, MPU6050_RA_INT_ENABLE, _BV(MPU6050_INTERRUPT_DMP_INT_BIT));  //enable hardware DMP interrupt
 }
 
+//on new data copy the FIFO packet so the next ISR transfer can't overwrite it while it is being used
 bool MPU6050::newData(void) {
-  if (m_newData) {
-    m_newData = false;
-    return true;
+  bool hasNewData = false;
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    if (m_newData) {
+      memcpy(m_sample, m_fifo_data, sizeof(m_sample));
+      m_newData = false;
+      hasNewData = true;
+    }
   }
-  return false;
+  return hasNewData;
 }
 
 int32_t MPU6050::getQuat(const uint8_t index) {
-  //return ((int32_t)m_fifo_data[index * 4] << 24) | ((int32_t)m_fifo_data[index * 4 + 1] << 16) | ((int32_t)m_fifo_data[index * 4 + 2] << 8) | m_fifo_data[index * 4 + 3];
-  int32_t tmp = *(int32_t *)&m_fifo_data[index * 4];
+  //return ((int32_t)m_sample[index * 4] << 24) | ((int32_t)m_sample[index * 4 + 1] << 16) | ((int32_t)m_sample[index * 4 + 2] << 8) | m_sample[index * 4 + 3];
+  int32_t tmp = *(int32_t *)&m_sample[index * 4];
   return __builtin_bswap32(tmp);
 }
 
 int16_t MPU6050::getAccel(const uint8_t index) {
-  //return ((int16_t)m_fifo_data[index * 2 + 16] << 8) | m_fifo_data[index * 2 + 17];
-  int16_t tmp = *(int16_t *)&m_fifo_data[index * 2 + 16];
+  //return ((int16_t)m_sample[index * 2 + 16] << 8) | m_sample[index * 2 + 17];
+  int16_t tmp = *(int16_t *)&m_sample[index * 2 + 16];
   return __builtin_bswap16(tmp);
 }
 
 int16_t MPU6050::getGyro(const uint8_t index) {
-  //return ((int16_t)m_fifo_data[index * 2 + 22] << 8) | m_fifo_data[index * 2 + 23];
-  int16_t tmp = *(int16_t *)&m_fifo_data[index * 2 + 22];
+  //return ((int16_t)m_sample[index * 2 + 22] << 8) | m_sample[index * 2 + 23];
+  int16_t tmp = *(int16_t *)&m_sample[index * 2 + 22];
   return __builtin_bswap16(tmp);
 }
 
